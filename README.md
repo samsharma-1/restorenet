@@ -1,12 +1,12 @@
-# KLA AI Hackathon 2026 — AI-Based Restoration of Degraded Images
+﻿# KLA AI Hackathon 2026 â€” AI-Based Restoration of Degraded Images
 
-Restore degraded scientific images by jointly removing speckle noise, recovering sharpness, and performing 2× super-resolution while maximizing restoration quality (SSIM, PSNR, low LPIPS) and minimizing inference latency on NVIDIA H100.
+Restore degraded scientific images by jointly removing speckle noise, recovering sharpness, and performing 2Ã— super-resolution while maximizing restoration quality (SSIM, PSNR, low LPIPS) and minimizing inference latency on NVIDIA H100.
 
 ## Goals
 
 - Remove multiplicative speckle noise
 - Recover sharpness degraded by Gaussian blur/noise
-- Perform 2× super-resolution
+- Perform 2Ã— super-resolution
 - Generalize to unseen datasets
 - Optimize end-to-end inference time
 
@@ -44,10 +44,10 @@ Supported formats: PNG, JPEG, TIFF, BMP, WebP.
 
 By default (`data.mode: on_the_fly`), the loader reads **clean HR images** and applies degradations on the fly:
 
-1. **Gaussian blur** (random σ)
+1. **Gaussian blur** (random Ïƒ)
 2. **Additive Gaussian noise** (optional, random std)
 3. **Multiplicative speckle noise**
-4. **2× bicubic downscale** → low-resolution input
+4. **2Ã— bicubic downscale** â†’ low-resolution input
 
 The model receives an LR/degraded tensor (`lr`) and learns to predict the clean HR target (`hr`). Pixel values stay in **[0, 1]** (no ImageNet normalization).
 
@@ -80,21 +80,21 @@ Mixed-resolution images are handled by resizing the shorter side to at least `da
 
 ```
 project-root/
-├── configs/           # YAML configs for training and inference
-├── data/              # Dataset directories (train / val / test)
-├── notebooks/         # EDA and experimentation
-├── src/               # Source package
-│   ├── datasets/      # Loaders, augmentations, synthetic degradation
-│   ├── models/        # NAFNet and variants (Phase 3)
-│   ├── losses/        # Combined loss functions (Phase 4)
-│   ├── metrics/       # SSIM, PSNR, LPIPS (Phase 6)
-│   ├── utils/         # Config, logging, I/O helpers
-│   ├── train.py       # Training CLI
-│   ├── evaluate.py    # Evaluation CLI
-│   └── inference.py   # Inference CLI
-├── outputs/           # Logs, predictions, reports
-├── checkpoints/       # Saved model weights
-└── tests/             # Unit tests
+â”œâ”€â”€ configs/           # YAML configs for training and inference
+â”œâ”€â”€ data/              # Dataset directories (train / val / test)
+â”œâ”€â”€ notebooks/         # EDA and experimentation
+â”œâ”€â”€ src/               # Source package
+â”‚   â”œâ”€â”€ datasets/      # Loaders, augmentations, synthetic degradation
+â”‚   â”œâ”€â”€ models/        # NAFNet and variants (Phase 3)
+â”‚   â”œâ”€â”€ losses/        # Combined loss functions (Phase 4)
+â”‚   â”œâ”€â”€ metrics/       # SSIM, PSNR, LPIPS (Phase 6)
+â”‚   â”œâ”€â”€ utils/         # Config, logging, I/O helpers
+â”‚   â”œâ”€â”€ train.py       # Training CLI
+â”‚   â”œâ”€â”€ evaluate.py    # Evaluation CLI
+â”‚   â””â”€â”€ inference.py   # Inference CLI
+â”œâ”€â”€ outputs/           # Logs, predictions, reports
+â”œâ”€â”€ checkpoints/       # Saved model weights
+â””â”€â”€ tests/             # Unit tests
 ```
 
 ## Roadmap
@@ -102,17 +102,17 @@ project-root/
 | Phase | Focus |
 |-------|-------|
 | 1 | Dataset exploration (EDA) |
-| 2 | Dataset loader, augmentations, synthetic degradation ✓ |
+| 2 | Dataset loader, augmentations, synthetic degradation âœ“ |
 | 3 | NAFNet baseline implementation |
-| 4 | Combined losses (L1, MS-SSIM, LPIPS, edge, FFT) |
-| 5 | Full training pipeline (AMP, checkpoints, W&B) |
+| 4 | Combined losses (L1, MS-SSIM, optional LPIPS, edge, FFT) ✓ |
+| 5 | Basic training pipeline (AMP, checkpoints, resume) ✓ |
 | 6 | Validation metrics and comparison reports |
 | 7 | Inference CLI |
 | 8 | Optimization (torch.compile, FP16, ONNX, TensorRT) |
 
 ## Usage (future)
 
-Training, evaluation, and inference entry points are scaffolded but raise `NotImplementedError` until later phases.
+Training is implemented for the baseline model. Evaluation and inference entry points are still scaffolded for later phases.
 
 ```bash
 # Training (Phase 5)
@@ -130,4 +130,5 @@ python -m src.inference --config configs/inference.yaml --weights checkpoints/be
 ```bash
 pytest tests/ -v
 ```
+
 

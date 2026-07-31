@@ -23,6 +23,7 @@ data:
   image_size: 256
   num_workers: 4
   pin_memory: true
+  drop_last: false
   mode: on_the_fly  # on_the_fly | paired
 
 degradation:
@@ -71,15 +72,15 @@ loss:
   weights:
     l1: 1.0
     ms_ssim: 0.5
-    lpips: 0.1
+    lpips: 0.0
     edge: 0.05
     fft: 0.05
 
 checkpoint:
   save_every_n_epochs: 5
   save_best_only: true
-  monitor_metric: val_ssim
-  mode: max
+  monitor_metric: val_total
+  mode: min
 
 wandb:
   enabled: true
@@ -92,4 +93,6 @@ wandb:
 
 tensorboard:
   enabled: true
+
+
 

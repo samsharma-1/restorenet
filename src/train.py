@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import argparse
 import logging
+import random
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import torch
+from torch import nn
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.utils.data import DataLoader
+
 from src.datasets.dataloader import build_dataloaders
+from src.losses import RestorationLoss
 from src.models import build_model
 from src.utils.config import load_config
 
@@ -34,37 +43,274 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def train(config: dict[str, Any], resume_path: str | None = None) -> None:
-    """Run the training loop.
+def _set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
-    Args:
-        config: Parsed training configuration.
-        resume_path: Optional checkpoint to resume from.
 
-    Raises:
-        NotImplementedError: Core training logic is implemented in Phase 5.
-    """
-    train_loader, val_loader = build_dataloaders(config)
-    model = build_model(config)
-    logger.info(
-        "Model ready: %s with %.2fM parameters",
-        model.__class__.__name__,
-        sum(parameter.numel() for parameter in model.parameters()) / 1_000_000,
+def _resolve_device(config: dict[str, Any]) -> torch.device:
+    requested = str(config.get("device", "cuda"))
+    if requested == "cuda" and not torch.cuda.is_available():
+        logger.warning("CUDA requested but unavailable; using CPU")
+        return torch.device("cpu")
+    return torch.device(requested)
+
+
+def _move_batch(batch: dict[str, Any], device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    return batch["lr"].to(device, non_blocking=True), batch["hr"].to(device, non_blocking=True)
+
+
+def _build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    config: dict[str, Any],
+) -> torch.optim.lr_scheduler.LRScheduler | None:
+    scheduler_cfg = config.get("scheduler", {})
+    if str(scheduler_cfg.get("name", "cosine")).lower() != "cosine":
+        return None
+
+    epochs = int(config.get("training", {}).get("epochs", 1))
+    warmup_epochs = int(scheduler_cfg.get("warmup_epochs", 0))
+    min_lr = float(scheduler_cfg.get("min_lr", 1e-6))
+    base_lr = float(config.get("training", {}).get("learning_rate", 2e-4))
+    eta_min_ratio = min_lr / base_lr if base_lr > 0 else 0.0
+
+    cosine = CosineAnnealingLR(
+        optimizer,
+        T_max=max(1, epochs - warmup_epochs),
+        eta_min=min_lr,
     )
+    if warmup_epochs <= 0:
+        return cosine
+
+    warmup = LinearLR(
+        optimizer,
+        start_factor=max(eta_min_ratio, 1e-3),
+        total_iters=warmup_epochs,
+    )
+    return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
+
+
+def _save_checkpoint(
+    path: Path,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+    epoch: int,
+    best_metric: float,
+    history: list[dict[str, float]],
+    config: dict[str, Any],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "epoch": epoch,
+        "model_state": model.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+        "best_metric": best_metric,
+        "history": history,
+        "config": config,
+    }
+    if scheduler is not None:
+        payload["scheduler_state"] = scheduler.state_dict()
+    torch.save(payload, path)
+
+
+def _load_checkpoint(
+    path: Path,
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler | None,
+    device: torch.device,
+) -> tuple[int, float, list[dict[str, float]]]:
+    checkpoint = torch.load(path, map_location=device)
+    model.load_state_dict(checkpoint["model_state"])
+    optimizer.load_state_dict(checkpoint["optimizer_state"])
+    if scheduler is not None and "scheduler_state" in checkpoint:
+        scheduler.load_state_dict(checkpoint["scheduler_state"])
+    return (
+        int(checkpoint.get("epoch", 0)) + 1,
+        float(checkpoint.get("best_metric", float("inf"))),
+        list(checkpoint.get("history", [])),
+    )
+
+
+def _run_train_epoch(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: RestorationLoss,
+    optimizer: torch.optim.Optimizer,
+    scaler: torch.amp.GradScaler,
+    device: torch.device,
+    use_amp: bool,
+    grad_clip_norm: float | None,
+) -> dict[str, float]:
+    model.train()
+    totals: dict[str, float] = {}
+    batches = 0
+
+    for batch in loader:
+        lr, hr = _move_batch(batch, device)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+            pred = model(lr)
+            loss, parts = criterion(pred, hr)
+
+        scaler.scale(loss).backward()
+        if grad_clip_norm is not None and grad_clip_norm > 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+        scaler.step(optimizer)
+        scaler.update()
+
+        for name, value in parts.items():
+            totals[name] = totals.get(name, 0.0) + float(value.detach().cpu())
+        batches += 1
+
+    if batches == 0:
+        raise RuntimeError("Training loader produced no batches; reduce batch_size or disable drop_last")
+    return {f"train_{name}": value / batches for name, value in totals.items()}
+
+
+def _run_validation(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: RestorationLoss,
+    device: torch.device,
+    use_amp: bool,
+) -> dict[str, float]:
+    model.eval()
+    totals: dict[str, float] = {}
+    batches = 0
+
+    with torch.no_grad():
+        for batch in loader:
+            lr, hr = _move_batch(batch, device)
+            with torch.amp.autocast(device_type=device.type, enabled=use_amp):
+                pred = model(lr)
+                _, parts = criterion(pred, hr)
+            for name, value in parts.items():
+                totals[name] = totals.get(name, 0.0) + float(value.detach().cpu())
+            batches += 1
+
+    if batches == 0:
+        raise RuntimeError("Validation loader produced no batches")
+    return {f"val_{name}": value / batches for name, value in totals.items()}
+
+
+def train(config: dict[str, Any], resume_path: str | None = None) -> dict[str, Any]:
+    """Run the training loop and save checkpoints."""
+    _set_seed(int(config.get("seed", 42)))
+    device = _resolve_device(config)
+    train_loader, val_loader = build_dataloaders(config)
+    model = build_model(config).to(device)
+    criterion = RestorationLoss(config.get("loss", {})).to(device)
+
+    training_cfg = config.get("training", {})
+    checkpoint_cfg = config.get("checkpoint", {})
+    paths_cfg = config.get("paths", {})
+    epochs = int(training_cfg.get("epochs", 1))
+    learning_rate = float(training_cfg.get("learning_rate", 2e-4))
+    weight_decay = float(training_cfg.get("weight_decay", 1e-4))
+    grad_clip_norm = training_cfg.get("grad_clip_norm", None)
+    grad_clip = float(grad_clip_norm) if grad_clip_norm is not None else None
+    use_amp = bool(training_cfg.get("mixed_precision", True)) and device.type == "cuda"
+
+    optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    scheduler = _build_scheduler(optimizer, config)
+    scaler = torch.amp.GradScaler(device.type, enabled=use_amp)
+
+    checkpoint_dir = Path(paths_cfg.get("checkpoint_dir", "checkpoints"))
+    monitor_metric = str(checkpoint_cfg.get("monitor_metric", "val_total"))
+    monitor_mode = str(checkpoint_cfg.get("mode", "min")).lower()
+    save_every = int(checkpoint_cfg.get("save_every_n_epochs", 5))
+    save_best_only = bool(checkpoint_cfg.get("save_best_only", False))
+    best_metric = float("inf") if monitor_mode == "min" else -float("inf")
+    start_epoch = 1
+    history: list[dict[str, float]] = []
+
+    if resume_path is not None:
+        start_epoch, best_metric, history = _load_checkpoint(
+            Path(resume_path), model, optimizer, scheduler, device
+        )
+        logger.info("Resumed from %s at epoch %d", resume_path, start_epoch)
+
     logger.info(
-        "Dataloaders ready: train=%d samples, val=%d samples, batch_size=%d",
+        "Training %s on %s: train=%d val=%d params=%.2fM",
+        model.__class__.__name__,
+        device,
         len(train_loader.dataset),
         len(val_loader.dataset),
-        config.get("training", {}).get("batch_size"),
+        sum(parameter.numel() for parameter in model.parameters()) / 1_000_000,
     )
-    _ = train_loader, val_loader, model
-    # TODO(Phase 4): Wire combined loss (L1, MS-SSIM, LPIPS, edge, FFT).
-    # TODO(Phase 5): Mixed precision, checkpoints, schedulers, W&B, TensorBoard.
-    _ = resume_path
-    logger.info("Training config loaded: model=%s", config.get("model", {}).get("name"))
-    raise NotImplementedError(
-        "Training loop not yet implemented. See Phase 5 in the roadmap."
+
+    for epoch in range(start_epoch, epochs + 1):
+        train_metrics = _run_train_epoch(
+            model=model,
+            loader=train_loader,
+            criterion=criterion,
+            optimizer=optimizer,
+            scaler=scaler,
+            device=device,
+            use_amp=use_amp,
+            grad_clip_norm=grad_clip,
+        )
+        val_metrics = _run_validation(model, val_loader, criterion, device, use_amp)
+        if scheduler is not None:
+            scheduler.step()
+
+        metrics = {"epoch": float(epoch), **train_metrics, **val_metrics}
+        history.append(metrics)
+        current = float(metrics.get(monitor_metric, metrics["val_total"]))
+        improved = current < best_metric if monitor_mode == "min" else current > best_metric
+        if improved:
+            best_metric = current
+            _save_checkpoint(
+                checkpoint_dir / "best_model.pth",
+                model,
+                optimizer,
+                scheduler,
+                epoch,
+                best_metric,
+                history,
+                config,
+            )
+
+        should_save_epoch = save_every > 0 and epoch % save_every == 0
+        if should_save_epoch and not save_best_only:
+            _save_checkpoint(
+                checkpoint_dir / f"epoch_{epoch:04d}.pth",
+                model,
+                optimizer,
+                scheduler,
+                epoch,
+                best_metric,
+                history,
+                config,
+            )
+
+        logger.info(
+            "Epoch %d/%d train_loss=%.4f val_loss=%.4f best_%s=%.4f",
+            epoch,
+            epochs,
+            metrics["train_total"],
+            metrics["val_total"],
+            monitor_metric,
+            best_metric,
+        )
+
+    _save_checkpoint(
+        checkpoint_dir / "last_model.pth",
+        model,
+        optimizer,
+        scheduler,
+        epochs,
+        best_metric,
+        history,
+        config,
     )
+    return {"history": history, "best_metric": best_metric, "checkpoint_dir": str(checkpoint_dir)}
 
 
 def main() -> None:

@@ -1,4 +1,4 @@
-"""DataLoader factory for restoration training."""
+﻿"""DataLoader factory for restoration training."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def build_dataloaders(
     train_loader = DataLoader(
         train_dataset,
         shuffle=True,
-        drop_last=True,
+        drop_last=bool(data_cfg.get("drop_last", False)),
         **loader_kwargs,
     )
     val_loader = DataLoader(
@@ -71,3 +71,5 @@ def build_dataloaders(
         **loader_kwargs,
     )
     return train_loader, val_loader
+
+
