@@ -1,0 +1,95 @@
+﻿# Training configuration for image restoration (NAFNet baseline)
+
+seed: 42
+device: cuda  # cuda | cpu
+
+paths:
+  train_dir: data/train
+  val_dir: data/validation
+  checkpoint_dir: checkpoints
+  output_dir: outputs
+  log_dir: outputs/logs
+
+model:
+  name: NAFNet
+  in_channels: 3
+  out_channels: 3
+  scale_factor: 2  # 2x super-resolution
+  width: 32
+  num_blocks: 8
+  dropout: 0.0
+
+data:
+  image_size: 256
+  num_workers: 4
+  pin_memory: true
+  mode: on_the_fly  # on_the_fly | paired
+
+degradation:
+  enabled: true
+  deterministic_val: true
+  downscale_factor: 2
+  speckle_var:
+    min: 0.01
+    max: 0.10
+  blur_sigma:
+    min: 0.5
+    max: 2.0
+  gaussian_noise_std:
+    min: 0.0
+    max: 0.05
+  apply_prob:
+    speckle: 1.0
+    blur: 1.0
+    noise: 0.5
+    downscale: 1.0
+
+augmentation:
+  train:
+    crop_size: 256
+    horizontal_flip: true
+    vertical_flip: true
+    rotate90: true
+  val:
+    crop_size: 256
+
+training:
+  batch_size: 8
+  epochs: 100
+  learning_rate: 2.0e-4
+  weight_decay: 1.0e-4
+  mixed_precision: true
+  grad_clip_norm: 1.0
+  early_stopping_patience: 15
+
+scheduler:
+  name: cosine
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+
+loss:
+  weights:
+    l1: 1.0
+    ms_ssim: 0.5
+    lpips: 0.1
+    edge: 0.05
+    fft: 0.05
+
+checkpoint:
+  save_every_n_epochs: 5
+  save_best_only: true
+  monitor_metric: val_ssim
+  mode: max
+
+wandb:
+  enabled: true
+  project: kla-image-restoration
+  entity: null
+  run_name: null
+  tags:
+    - nafnet
+    - baseline
+
+tensorboard:
+  enabled: true
+

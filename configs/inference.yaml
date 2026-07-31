@@ -1,0 +1,33 @@
+# Inference configuration for image restoration
+
+device: cuda  # cuda | cpu
+fp16: true
+
+paths:
+  weights: checkpoints/best_model.pth
+  input_dir: data/test
+  output_dir: outputs/predictions
+
+model:
+  name: NAFNet
+  in_channels: 3
+  out_channels: 3
+  scale_factor: 2
+
+data:
+  image_size: 256
+  extensions:
+    - .png
+    - .jpg
+    - .jpeg
+    - .tif
+    - .tiff
+
+output:
+  save_format: png
+  normalize: false
+
+benchmark:
+  enabled: false
+  warmup_runs: 5
+  timed_runs: 20
