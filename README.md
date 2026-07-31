@@ -131,6 +131,3 @@ python -m src.inference --config configs/inference.yaml --weights checkpoints/be
 pytest tests/ -v
 ```
 
-## License
-
-KLA AI Hackathon 2026 — internal competition project.
