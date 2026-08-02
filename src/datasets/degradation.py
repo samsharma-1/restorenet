@@ -17,10 +17,14 @@ class DegradationConfig:
     speckle_var: float = 0.05
     blur_sigma: float = 1.0
     gaussian_noise_std: float = 0.02
+    jpeg_quality: int = 90
+    poisson_scale: float = 0.0
     apply_speckle: bool = True
     apply_blur: bool = True
     apply_noise: bool = True
     apply_downscale: bool = True
+    apply_jpeg: bool = False
+    apply_poisson: bool = False
 
 
 def apply_speckle_noise(
@@ -96,6 +100,30 @@ def apply_gaussian_noise(
     return np.clip(image + noise, 0.0, 1.0).astype(np.float32)
 
 
+def apply_jpeg_compression(image: np.ndarray, quality: int) -> np.ndarray:
+    """Apply JPEG compression artifacts."""
+    if quality >= 100 or quality <= 0:
+        return image.copy()
+    
+    img_u8 = np.clip(image * 255.0, 0, 255).astype(np.uint8)
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)]
+    _, encimg = cv2.imencode('.jpg', img_u8, encode_param)
+    decimg = cv2.imdecode(encimg, 1)
+    
+    return (decimg / 255.0).astype(np.float32)
+
+
+def apply_poisson_noise(image: np.ndarray, scale: float, rng: np.random.Generator | None = None) -> np.ndarray:
+    """Apply Poisson (sensor-like shot) noise."""
+    if scale <= 0:
+        return image.copy()
+        
+    generator = rng or np.random.default_rng()
+    scaled = np.clip(image * scale, 0, None)
+    noisy = generator.poisson(scaled) / scale
+    return np.clip(noisy, 0.0, 1.0).astype(np.float32)
+
+
 def apply_downscale(
     image: np.ndarray,
     factor: int = 2,
@@ -148,10 +176,14 @@ def sample_degradation_params(
         speckle_var=_sample("speckle_var", 0.05),
         blur_sigma=_sample("blur_sigma", 1.0),
         gaussian_noise_std=_sample("gaussian_noise_std", 0.02),
+        jpeg_quality=int(_sample("jpeg_quality", 90)),
+        poisson_scale=_sample("poisson_scale", 100.0),
         apply_speckle=_sample_bool("speckle", 1.0),
         apply_blur=_sample_bool("blur", 1.0),
         apply_noise=_sample_bool("noise", 0.5),
         apply_downscale=_sample_bool("downscale", 1.0),
+        apply_jpeg=_sample_bool("jpeg", 0.0),
+        apply_poisson=_sample_bool("poisson", 0.0),
     )
 
 
@@ -177,6 +209,8 @@ def apply_synthetic_degradation(
     generator = rng or np.random.default_rng()
     degraded = image.copy()
 
+    if params.apply_poisson:
+        degraded = apply_poisson_noise(degraded, params.poisson_scale, rng=generator)
     if params.apply_blur:
         degraded = apply_gaussian_blur(degraded, params.blur_sigma)
     if params.apply_noise:
@@ -185,6 +219,8 @@ def apply_synthetic_degradation(
         )
     if params.apply_speckle:
         degraded = apply_speckle_noise(degraded, params.speckle_var, rng=generator)
+    if params.apply_jpeg:
+        degraded = apply_jpeg_compression(degraded, params.jpeg_quality)
 
     if params.apply_downscale:
         lr = apply_downscale(degraded, factor=params.downscale_factor)

@@ -1,4 +1,4 @@
-﻿"""Training entry point for the image restoration pipeline."""
+"""Training entry point for the image restoration pipeline."""
 
 from __future__ import annotations
 
@@ -15,10 +15,13 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
 
+from torch.utils.tensorboard import SummaryWriter
+
 from src.datasets.dataloader import build_dataloaders
 from src.losses import RestorationLoss
 from src.models import build_model
 from src.utils.config import load_config
+from src.metrics.restoration_metrics import RestorationMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +182,7 @@ def _run_validation(
     criterion: RestorationLoss,
     device: torch.device,
     use_amp: bool,
+    metrics_calc: RestorationMetrics,
 ) -> dict[str, float]:
     model.eval()
     totals: dict[str, float] = {}
@@ -190,7 +194,12 @@ def _run_validation(
             with torch.amp.autocast(device_type=device.type, enabled=use_amp):
                 pred = model(lr)
                 _, parts = criterion(pred, hr)
+            
+            img_metrics = metrics_calc(pred.float(), hr.float())
+            
             for name, value in parts.items():
+                totals[name] = totals.get(name, 0.0) + float(value.detach().cpu())
+            for name, value in img_metrics.items():
                 totals[name] = totals.get(name, 0.0) + float(value.detach().cpu())
             batches += 1
 
@@ -222,13 +231,21 @@ def train(config: dict[str, Any], resume_path: str | None = None) -> dict[str, A
     scaler = torch.amp.GradScaler(device.type, enabled=use_amp)
 
     checkpoint_dir = Path(paths_cfg.get("checkpoint_dir", "checkpoints"))
+    log_dir = paths_cfg.get("log_dir", "outputs/logs")
+    tb_writer = SummaryWriter(log_dir) if config.get("tensorboard", {}).get("enabled", True) else None
+    
     monitor_metric = str(checkpoint_cfg.get("monitor_metric", "val_total"))
     monitor_mode = str(checkpoint_cfg.get("mode", "min")).lower()
     save_every = int(checkpoint_cfg.get("save_every_n_epochs", 5))
     save_best_only = bool(checkpoint_cfg.get("save_best_only", False))
+    early_stopping_patience = int(training_cfg.get("early_stopping_patience", 15))
+    
     best_metric = float("inf") if monitor_mode == "min" else -float("inf")
+    epochs_without_improvement = 0
     start_epoch = 1
     history: list[dict[str, float]] = []
+
+    metrics_calc = RestorationMetrics(device=device, compute_lpips=False)
 
     if resume_path is not None:
         start_epoch, best_metric, history = _load_checkpoint(
@@ -256,16 +273,24 @@ def train(config: dict[str, Any], resume_path: str | None = None) -> dict[str, A
             use_amp=use_amp,
             grad_clip_norm=grad_clip,
         )
-        val_metrics = _run_validation(model, val_loader, criterion, device, use_amp)
+        val_metrics = _run_validation(model, val_loader, criterion, device, use_amp, metrics_calc)
         if scheduler is not None:
             scheduler.step()
 
         metrics = {"epoch": float(epoch), **train_metrics, **val_metrics}
         history.append(metrics)
-        current = float(metrics.get(monitor_metric, metrics["val_total"]))
+        
+        if tb_writer is not None:
+            for k, v in train_metrics.items():
+                tb_writer.add_scalar(k, v, epoch)
+            for k, v in val_metrics.items():
+                tb_writer.add_scalar(k, v, epoch)
+                
+        current = float(metrics.get(monitor_metric, metrics.get("val_total", 0.0)))
         improved = current < best_metric if monitor_mode == "min" else current > best_metric
         if improved:
             best_metric = current
+            epochs_without_improvement = 0
             _save_checkpoint(
                 checkpoint_dir / "best_model.pth",
                 model,
@@ -276,6 +301,8 @@ def train(config: dict[str, Any], resume_path: str | None = None) -> dict[str, A
                 history,
                 config,
             )
+        else:
+            epochs_without_improvement += 1
 
         should_save_epoch = save_every > 0 and epoch % save_every == 0
         if should_save_epoch and not save_best_only:
@@ -294,18 +321,25 @@ def train(config: dict[str, Any], resume_path: str | None = None) -> dict[str, A
             "Epoch %d/%d train_loss=%.4f val_loss=%.4f best_%s=%.4f",
             epoch,
             epochs,
-            metrics["train_total"],
-            metrics["val_total"],
+            metrics.get("train_total", 0.0),
+            metrics.get("val_total", 0.0),
             monitor_metric,
             best_metric,
         )
+
+        if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
+            logger.info("Early stopping triggered at epoch %d", epoch)
+            break
+
+    if tb_writer is not None:
+        tb_writer.close()
 
     _save_checkpoint(
         checkpoint_dir / "last_model.pth",
         model,
         optimizer,
         scheduler,
-        epochs,
+        epoch,
         best_metric,
         history,
         config,

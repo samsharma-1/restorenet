@@ -1,4 +1,4 @@
-﻿"""Compact NAFNet-style baseline for image restoration."""
+"""Compact NAFNet-style baseline for image restoration."""
 
 from __future__ import annotations
 
@@ -142,18 +142,104 @@ class NAFNet(nn.Module):
         return torch.clamp(restored + skip, 0.0, 1.0)
 
 
+class NAFNetUNet(nn.Module):
+    """Encoder-decoder NAFNet for full image restoration."""
+
+    def __init__(
+        self,
+        in_channels: int = 3,
+        out_channels: int = 3,
+        width: int = 32,
+        enc_blocks: list[int] = [1, 1, 1, 1],
+        mid_blocks: int = 1,
+        dec_blocks: list[int] = [1, 1, 1, 1],
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.intro = nn.Conv2d(in_channels, width, kernel_size=3, padding=1)
+        
+        self.encoders = nn.ModuleList()
+        self.downs = nn.ModuleList()
+        
+        chan = width
+        for num in enc_blocks:
+            self.encoders.append(
+                nn.Sequential(*[NAFBlock(chan, dropout=dropout) for _ in range(num)])
+            )
+            self.downs.append(nn.Conv2d(chan, chan * 2, kernel_size=2, stride=2))
+            chan *= 2
+            
+        self.middle = nn.Sequential(*[NAFBlock(chan, dropout=dropout) for _ in range(mid_blocks)])
+        
+        self.decoders = nn.ModuleList()
+        self.ups = nn.ModuleList()
+        
+        for num in dec_blocks:
+            self.ups.append(
+                nn.Sequential(
+                    nn.Conv2d(chan, chan * 2, kernel_size=1),
+                    nn.PixelShuffle(2)
+                )
+            )
+            chan //= 2
+            self.decoders.append(
+                nn.Sequential(*[NAFBlock(chan, dropout=dropout) for _ in range(num)])
+            )
+            
+        self.ending = nn.Conv2d(width, out_channels, kernel_size=3, padding=1)
+        
+        self.skip_projection = (
+            nn.Conv2d(in_channels, out_channels, kernel_size=1)
+            if in_channels != out_channels
+            else nn.Identity()
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        features = self.intro(x)
+        
+        skips = []
+        for encoder, down in zip(self.encoders, self.downs):
+            features = encoder(features)
+            skips.append(features)
+            features = down(features)
+            
+        features = self.middle(features)
+        
+        for decoder, up, skip in zip(self.decoders, self.ups, reversed(skips)):
+            features = up(features)
+            features = features + skip
+            features = decoder(features)
+            
+        restored = self.ending(features)
+        skip_x = self.skip_projection(x)
+        return torch.clamp(restored + skip_x, 0.0, 1.0)
+
+
 def build_model(config: dict[str, Any]) -> nn.Module:
     """Build a model from the repository YAML config structure."""
     model_cfg = config.get("model", config)
     name = str(model_cfg.get("name", "NAFNet")).lower()
-    if name != "nafnet":
+    
+    if name == "nafnet":
+        return NAFNet(
+            in_channels=int(model_cfg.get("in_channels", 3)),
+            out_channels=int(model_cfg.get("out_channels", 3)),
+            width=int(model_cfg.get("width", 32)),
+            num_blocks=int(model_cfg.get("num_blocks", 8)),
+            scale_factor=int(model_cfg.get("scale_factor", 2)),
+            dropout=float(model_cfg.get("dropout", 0.0)),
+        )
+    elif name == "nafnetunet":
+        enc_blocks = model_cfg.get("enc_blocks", [1, 1, 1, 1])
+        dec_blocks = model_cfg.get("dec_blocks", [1, 1, 1, 1])
+        return NAFNetUNet(
+            in_channels=int(model_cfg.get("in_channels", 3)),
+            out_channels=int(model_cfg.get("out_channels", 3)),
+            width=int(model_cfg.get("width", 32)),
+            enc_blocks=enc_blocks,
+            mid_blocks=int(model_cfg.get("mid_blocks", 1)),
+            dec_blocks=dec_blocks,
+            dropout=float(model_cfg.get("dropout", 0.0)),
+        )
+    else:
         raise ValueError(f"Unsupported model: {model_cfg.get('name')}")
-
-    return NAFNet(
-        in_channels=int(model_cfg.get("in_channels", 3)),
-        out_channels=int(model_cfg.get("out_channels", 3)),
-        width=int(model_cfg.get("width", 32)),
-        num_blocks=int(model_cfg.get("num_blocks", 8)),
-        scale_factor=int(model_cfg.get("scale_factor", 2)),
-        dropout=float(model_cfg.get("dropout", 0.0)),
-    )
