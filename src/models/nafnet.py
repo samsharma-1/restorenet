@@ -1,4 +1,7 @@
 """Compact NAFNet-style baseline for image restoration."""
+import torch
+from torch import nn
+import torch.nn.functional as F  # <--- Add this line
 
 from __future__ import annotations
 
@@ -194,25 +197,27 @@ class NAFNetUNet(nn.Module):
             else nn.Identity()
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        features = self.intro(x)
-        
-        skips = []
-        for encoder, down in zip(self.encoders, self.downs):
-            features = encoder(features)
-            skips.append(features)
-            features = down(features)
-            
-        features = self.middle(features)
-        
-        for decoder, up, skip in zip(self.decoders, self.ups, reversed(skips)):
-            features = up(features)
-            features = features + skip
-            features = decoder(features)
-            
-        restored = self.ending(features)
-        skip_x = self.skip_projection(x)
-        return torch.clamp(restored + skip_x, 0.0, 1.0)
+# Inside NAFNetUNet class
+def forward(self, x: torch.Tensor) -> torch.Tensor:
+    # 1. Calculate required padding (multiple of 2^levels)
+    h, w = x.shape[-2:]
+    mod = 2**len(self.encoders)
+    pad_h = (mod - h % mod) % mod
+    pad_w = (mod - w % mod) % mod
+    
+    # 2. Apply padding
+    x_padded = F.pad(x, (0, pad_w, 0, pad_h), mode='reflect')
+    
+    # 3. Existing logic using x_padded
+    features = self.intro(x_padded)
+    # ... (encoder/middle/decoder blocks)
+    restored = self.ending(features)
+    
+    # 4. Crop back to original size
+    restored = restored[:, :, :h, :w]
+    
+    skip_x = self.skip_projection(x)
+    return torch.clamp(restored + skip_x, 0.0, 1.0)
 
 
 def build_model(config: dict[str, Any]) -> nn.Module:

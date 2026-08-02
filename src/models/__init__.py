@@ -1,5 +1,3 @@
-﻿"""Model architectures (NAFNet baseline and variants)."""
+﻿from .nafnet import NAFNet, NAFNetUNet, build_model
 
-from src.models.nafnet import NAFBlock, NAFNet, build_model
-
-__all__ = ["NAFBlock", "NAFNet", "build_model"]
+__all__ = ["NAFNet", "NAFNetUNet", "build_model"]

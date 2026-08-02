@@ -14,14 +14,18 @@ from torch import nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader
-
 from torch.utils.tensorboard import SummaryWriter
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
 
 from src.datasets.dataloader import build_dataloaders
 from src.losses import RestorationLoss
+from src.metrics.restoration_metrics import RestorationMetrics
 from src.models import build_model
 from src.utils.config import load_config
-from src.metrics.restoration_metrics import RestorationMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -167,8 +171,9 @@ def _run_train_epoch(
         scaler.step(optimizer)
         scaler.update()
 
+        # Bug Fix: Use .item() to extract Python floats and release autograd graph
         for name, value in parts.items():
-            totals[name] = totals.get(name, 0.0) + float(value.detach().cpu())
+            totals[name] = totals.get(name, 0.0) + value.item()
         batches += 1
 
     if batches == 0:
@@ -194,13 +199,14 @@ def _run_validation(
             with torch.amp.autocast(device_type=device.type, enabled=use_amp):
                 pred = model(lr)
                 _, parts = criterion(pred, hr)
-            
+
             img_metrics = metrics_calc(pred.float(), hr.float())
-            
+
+            # Bug Fix: Use .item() to extract scalar values safely
             for name, value in parts.items():
-                totals[name] = totals.get(name, 0.0) + float(value.detach().cpu())
+                totals[name] = totals.get(name, 0.0) + value.item()
             for name, value in img_metrics.items():
-                totals[name] = totals.get(name, 0.0) + float(value.detach().cpu())
+                totals[name] = totals.get(name, 0.0) + value.item()
             batches += 1
 
     if batches == 0:
@@ -228,18 +234,20 @@ def train(config: dict[str, Any], resume_path: str | None = None) -> dict[str, A
 
     optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = _build_scheduler(optimizer, config)
-    scaler = torch.amp.GradScaler(device.type, enabled=use_amp)
+    
+    # Bug Fix: Explicitly pass "cuda" string or disable scaler for CPU
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     checkpoint_dir = Path(paths_cfg.get("checkpoint_dir", "checkpoints"))
     log_dir = paths_cfg.get("log_dir", "outputs/logs")
     tb_writer = SummaryWriter(log_dir) if config.get("tensorboard", {}).get("enabled", True) else None
-    
+
     monitor_metric = str(checkpoint_cfg.get("monitor_metric", "val_total"))
     monitor_mode = str(checkpoint_cfg.get("mode", "min")).lower()
     save_every = int(checkpoint_cfg.get("save_every_n_epochs", 5))
     save_best_only = bool(checkpoint_cfg.get("save_best_only", False))
     early_stopping_patience = int(training_cfg.get("early_stopping_patience", 15))
-    
+
     best_metric = float("inf") if monitor_mode == "min" else -float("inf")
     epochs_without_improvement = 0
     start_epoch = 1
@@ -279,15 +287,24 @@ def train(config: dict[str, Any], resume_path: str | None = None) -> dict[str, A
 
         metrics = {"epoch": float(epoch), **train_metrics, **val_metrics}
         history.append(metrics)
+        metrics = {"epoch": float(epoch), **train_metrics, **val_metrics}
+        history.append(metrics)
         
+        # --- ADD THIS: WandB Logging ---
+        if WANDB_AVAILABLE and wandb.run:
+            wandb.log(metrics, step=epoch)
+        # -------------------------------
+
         if tb_writer is not None:
             for k, v in train_metrics.items():
                 tb_writer.add_scalar(k, v, epoch)
             for k, v in val_metrics.items():
                 tb_writer.add_scalar(k, v, epoch)
-                
-        current = float(metrics.get(monitor_metric, metrics.get("val_total", 0.0)))
+
+        default_metric_val = float("inf") if monitor_mode == "min" else -float("inf")
+        current = float(metrics.get(monitor_metric, default_metric_val))
         improved = current < best_metric if monitor_mode == "min" else current > best_metric
+        
         if improved:
             best_metric = current
             epochs_without_improvement = 0
@@ -339,7 +356,7 @@ def train(config: dict[str, Any], resume_path: str | None = None) -> dict[str, A
         model,
         optimizer,
         scheduler,
-        epoch,
+        epoch if 'epoch' in locals() else start_epoch,
         best_metric,
         history,
         config,
@@ -361,4 +378,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
